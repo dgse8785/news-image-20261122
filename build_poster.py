@@ -1,196 +1,226 @@
 #!/usr/bin/env python3
-"""Draw the 22 November 2026 news poster as a 1024x1024 PNG.
+"""Compose the Sunday 22 November 2026 world-news poster.
 
-The picture is a dark-navy front page: a masthead naming the day,
-one lead panel about NATO and Poland, four story cards in a
-two-by-two grid, a full-width card on a pair of hacking stories,
-and a short ALSO TODAY strip along the bottom.
-
-Everything is drawn with fixed coordinates and the DejaVu fonts, so
-running this script again always produces the same image bytes.
-The layout keeps the previous days' front-page shape, tightened a
-little so the longer ALSO TODAY strip still fits above the footer.
+Rather than placing every story at a hand-picked coordinate, this
+renderer treats the page as a vertical stack of sections.  A small
+catalogue below describes each story once; the renderer then walks
+that catalogue from top to bottom, giving the lead a tall slot, the
+four middle stories two paired rows, the hacking story a wide slot,
+and the short items a closing text block.  Pillow supplies the
+canvas and the DejaVu typefaces supply the lettering.
+Section heights are fixed allocations in the walk, chosen so the
+longest stories of the day still land inside their boxes.
 """
 
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-WIDTH = 1024
-HEIGHT = 1024
-MARGIN = 36
-CONTENT = WIDTH - 2 * MARGIN
+PAGE = 1024
+EDGE = 40
+SPAN = PAGE - EDGE * 2
+GUTTER = 12
 
-BACKGROUND = (9, 20, 38)
-PANEL = (16, 33, 57)
-PANEL_ALT = (20, 39, 66)
-GOLD = (216, 178, 62)
-PAPER = (236, 241, 248)
-MUTED = (168, 184, 204)
-ACCENT = (232, 92, 82)
-TEAL = (84, 196, 178)
+INK = (8, 18, 34)
+BOX = (18, 36, 60)
+BOX_SOFT = (22, 42, 68)
+LINE = (58, 84, 118)
+WHITE = (238, 243, 250)
+GREY = (172, 188, 208)
+YELLOW = (219, 181, 66)
+RED = (233, 96, 84)
+MINT = (86, 199, 181)
 
-BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-PLAIN_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+FONT_DIR = Path("/usr/share/fonts/truetype/dejavu")
+HEAVY_FILE = FONT_DIR / "DejaVuSans-Bold.ttf"
+LIGHT_FILE = FONT_DIR / "DejaVuSans.ttf"
 
-HERE = Path(__file__).resolve().parent
+OUTPUT_FILE = Path(__file__).resolve().parent / "entry.png"
+
+LEAD_STORY = {
+    "tag": "LEAD - NATO AND UKRAINE",
+    "title": "NATO VOWS TO DEFEND POLAND",
+    "text": (
+        "NATO vows to defend every inch of Polish territory after a "
+        "Russian airspace violation. Russia strikes Zelenskyy's "
+        "hometown Kryvyi Rih, killing an emergency worker and a "
+        "7-year-old boy. Ukraine marks the Day of Dignity and Freedom "
+        "and keeps hitting the Crimean Bridge; Zelenskyy brands Putin "
+        "a killer after Trump calls him his friend."
+    ),
+    "colour": RED,
+}
+
+GRID_STORIES = [
+    {
+        "tag": "MIDDLE EAST - HORMUZ",
+        "title": "HORMUZ",
+        "text": (
+            "Bahrain says Iran struck an industrial site as tankers "
+            "are hit in the Strait of Hormuz. Iran: a reopening is "
+            "possible if the US accepts reasonable terms. Pentagon: "
+            "war cost over $48 billion."
+        ),
+        "colour": YELLOW,
+    },
+    {
+        "tag": "MEXICO - CARTEL ARREST",
+        "title": "EL CHAPO ISIDRO",
+        "text": (
+            "Mexico captures FBI Ten Most Wanted cartel boss El Chapo "
+            "Isidro with US support. Deadly Sinaloa violence leaves "
+            "11 dead after the arrest."
+        ),
+        "colour": MINT,
+    },
+    {
+        "tag": "CLIMATE - COP31",
+        "title": "COP31",
+        "text": (
+            "Climate talks stretch into overtime with no agreement "
+            "in sight - the fossil-fuel dispute threatens to scupper "
+            "the deal as countries remain divided on key issues."
+        ),
+        "colour": MINT,
+    },
+    {
+        "tag": "UNITED STATES - TRUMP",
+        "title": "TRUMP CAP",
+        "text": (
+            "Trump vows to work with Democrats to cap credit card "
+            "interest rates at 10%."
+        ),
+        "colour": YELLOW,
+    },
+]
+
+WIDE_STORY = {
+    "tag": "SECURITY AND TECH - UNITED STATES",
+    "title": "HACKED",
+    "text": (
+        "The US Agriculture Department and the FBI are breached by "
+        "hackers, reports say; Nvidia faces a US accounting probe as "
+        "Jensen Huang's exit and a China spy saga deepen the turmoil."
+    ),
+    "colour": YELLOW,
+}
+
+BRIEF_ITEMS = [
+    "Fire at a Jakarta confectionery factory kills three, 36 missing",
+    "At least 24 dead in Nigeria when a boat capsizes carrying people to a funeral",
+    "French protesters rally for a sixth weekend over living costs",
+    "China opposes the US ban on telecom firms' access to phone numbers",
+]
 
 
-def font(size, bold=False):
-    """Load one DejaVu face at the requested pixel size."""
-    return ImageFont.truetype(BOLD_PATH if bold else PLAIN_PATH, size)
+def typeface(points, heavy=False):
+    """Return a DejaVu face, bold when heavy asks for weight."""
+    chosen = HEAVY_FILE if heavy else LIGHT_FILE
+    return ImageFont.truetype(str(chosen), points)
 
 
-def wrap_lines(draw, text, face, limit):
-    """Split text into lines that each fit inside limit pixels."""
-    lines = []
-    current = ""
-    for word in text.split():
-        trial = word if not current else current + " " + word
-        box = draw.textbbox((0, 0), trial, font=face)
-        if box[2] - box[0] <= limit or not current:
-            current = trial
+def break_into_lines(painter, wording, face, max_width):
+    """Greedily pack words into lines no wider than max_width."""
+    packed = []
+    pending = ""
+    for token in wording.split():
+        attempt = token if pending == "" else pending + " " + token
+        if painter.textlength(attempt, font=face) <= max_width or pending == "":
+            pending = attempt
         else:
-            lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines
+            packed.append(pending)
+            pending = token
+    if pending != "":
+        packed.append(pending)
+    return packed
 
 
-def draw_wrapped(draw, xy, text, face, fill, limit, leading):
-    """Draw wrapped text from xy and return the y just past it."""
-    x, y = xy
-    for line in wrap_lines(draw, text, face, limit):
-        draw.text((x, y), line, font=face, fill=fill)
-        y += leading
-    return y
+def paint_text(painter, left, top, wording, face, colour, max_width, step):
+    """Paint wording line by line and report the new vertical spot."""
+    cursor = top
+    for row in break_into_lines(painter, wording, face, max_width):
+        painter.text((left, cursor), row, font=face, fill=colour)
+        cursor += step
+    return cursor
 
 
-def panel_box(draw, box, fill=PANEL):
-    """Draw one rounded story panel with a thin outline."""
-    draw.rounded_rectangle(box, radius=14, fill=fill, outline=(52, 76, 108), width=2)
+def paint_section(painter, rect, story, title_points=21):
+    """Paint one boxed story: side stripe, tag, title, then body."""
+    left, top, right, bottom = rect
+    painter.rounded_rectangle(rect, radius=13, fill=BOX_SOFT, outline=LINE, width=2)
+    painter.rectangle([left, top + 11, left + 5, top + 56], fill=story["colour"])
+    inner_width = right - left - 34
+    spot = paint_text(painter, left + 17, top + 12, story["tag"],
+                      typeface(14, heavy=True), story["colour"], inner_width, 18)
+    spot = paint_text(painter, left + 17, spot + 2, story["title"],
+                      typeface(title_points, heavy=True), WHITE, inner_width, title_points + 4)
+    paint_text(painter, left + 17, spot + 4, story["text"],
+               typeface(15), GREY, inner_width, 20)
 
 
-def card(draw, box, kicker, headline, body, accent=GOLD):
-    """Fill one grid card with a kicker, a headline and body copy."""
-    panel_box(draw, box, fill=PANEL_ALT)
-    x0, y0, x1, _ = box
-    inner = x1 - x0 - 32
-    draw.rectangle([x0, y0 + 10, x0 + 5, y0 + 58], fill=accent)
-    y = draw_wrapped(draw, (x0 + 16, y0 + 12), kicker, font(15, bold=True), accent, inner, 19)
-    y = draw_wrapped(draw, (x0 + 16, y + 2), headline, font(21, bold=True), PAPER, inner, 25)
-    draw_wrapped(draw, (x0 + 16, y + 4), body, font(16), MUTED, inner, 20)
+def paint_masthead(painter):
+    """Paint the centred title block and return where stories begin."""
+    banner = "THE WORLD IN ONE IMAGE"
+    banner_face = typeface(42, heavy=True)
+    banner_width = painter.textlength(banner, font=banner_face)
+    painter.text(((PAGE - banner_width) / 2, 26), banner, font=banner_face, fill=WHITE)
+    day = "SUNDAY - 22 NOVEMBER 2026"
+    day_face = typeface(22, heavy=True)
+    day_width = painter.textlength(day, font=day_face)
+    painter.text(((PAGE - day_width) / 2, 80), day, font=day_face, fill=YELLOW)
+    painter.rectangle([EDGE, 118, PAGE - EDGE, 122], fill=YELLOW)
+    return 134
 
 
-def build_poster():
-    """Render the whole front page and save it beside this script."""
-    image = Image.new("RGB", (WIDTH, HEIGHT), BACKGROUND)
-    draw = ImageDraw.Draw(image)
+def render_page():
+    """Assemble every section in order and save the finished page."""
+    canvas = Image.new("RGB", (PAGE, PAGE), INK)
+    painter = ImageDraw.Draw(canvas)
+    cursor = paint_masthead(painter)
 
-    # Masthead: the title, then the day it sums up in gold.
-    title_face = font(43, bold=True)
-    title = "THE WORLD IN ONE IMAGE"
-    title_box = draw.textbbox((0, 0), title, font=title_face)
-    title_w = title_box[2] - title_box[0]
-    draw.text(((WIDTH - title_w) / 2, 24), title, font=title_face, fill=PAPER)
-    date_face = font(22, bold=True)
-    date_text = "SUNDAY · 22 NOVEMBER 2026"
-    date_box = draw.textbbox((0, 0), date_text, font=date_face)
-    date_w = date_box[2] - date_box[0]
-    draw.text(((WIDTH - date_w) / 2, 78), date_text, font=date_face, fill=GOLD)
-    draw.rectangle([MARGIN, 116, WIDTH - MARGIN, 120], fill=GOLD)
+    # Lead slot: taller than the rest, with a larger title treatment.
+    lead_rect = [EDGE, cursor, PAGE - EDGE, cursor + 232]
+    painter.rounded_rectangle(lead_rect, radius=13, fill=BOX, outline=LINE, width=2)
+    painter.rectangle([EDGE, cursor + 11, EDGE + 5, cursor + 62], fill=RED)
+    lead_width = SPAN - 40
+    spot = paint_text(painter, EDGE + 20, cursor + 14, LEAD_STORY["tag"],
+                      typeface(16, heavy=True), RED, lead_width, 20)
+    spot = paint_text(painter, EDGE + 20, spot + 4, LEAD_STORY["title"],
+                      typeface(34, heavy=True), WHITE, lead_width, 41)
+    paint_text(painter, EDGE + 20, spot + 8, LEAD_STORY["text"],
+               typeface(18), GREY, lead_width, 25)
+    cursor += 232 + GUTTER
 
-    # Lead panel: NATO vows to defend Poland after the violation.
-    lead_box = [MARGIN, 132, WIDTH - MARGIN, 382]
-    panel_box(draw, lead_box)
-    draw.rectangle([MARGIN, 142, MARGIN + 5, 196], fill=ACCENT)
-    y = draw_wrapped(draw, (MARGIN + 20, 146), "LEAD · NATO AND UKRAINE",
-                     font(16, bold=True), ACCENT, CONTENT - 40, 20)
-    y = draw_wrapped(draw, (MARGIN + 20, y + 4), "NATO VOWS TO DEFEND POLAND",
-                     font(35, bold=True), PAPER, CONTENT - 40, 42)
-    lead_body = (
-        "NATO vows to defend \"every inch\" of Polish territory after a "
-        "Russian airspace violation. Russia strikes Zelenskyy's hometown "
-        "Kryvyi Rih, killing an emergency worker and a 7-year-old boy. "
-        "Ukraine marks the Day of Dignity and Freedom and keeps hitting "
-        "the Crimean Bridge; Zelenskyy brands Putin a \"killer\" after "
-        "Trump calls him his \"friend\"."
-    )
-    draw_wrapped(draw, (MARGIN + 20, y + 8), lead_body, font(19), MUTED,
-                 CONTENT - 40, 26)
+    # Paired rows: the grid catalogue is consumed two stories at a time.
+    column_width = (SPAN - GUTTER) // 2
+    for pair_start in (0, 2):
+        for offset in (0, 1):
+            story = GRID_STORIES[pair_start + offset]
+            col_left = EDGE + offset * (column_width + GUTTER)
+            rect = [col_left, cursor, col_left + column_width, cursor + 158]
+            paint_section(painter, rect, story)
+        cursor += 158 + GUTTER
 
-    # Two-by-two grid of the next four stories.
-    gap = 14
-    card_w = (CONTENT - gap) // 2
-    card_h = 164
-    top_row = 396
-    bottom_row = top_row + card_h + gap
-    left_x = MARGIN
-    right_x = MARGIN + card_w + gap
-    card(draw, [left_x, top_row, left_x + card_w, top_row + card_h],
-         "MIDDLE EAST · HORMUZ", "HORMUZ",
-         "Bahrain says Iran struck an industrial site as tankers are hit "
-         "in the Strait of Hormuz. Iran: a reopening is possible if the "
-         "US accepts \"reasonable\" terms. Pentagon: war cost over "
-         "$48 billion.")
-    card(draw, [right_x, top_row, right_x + card_w, top_row + card_h],
-         "MEXICO · CARTEL ARREST", "EL CHAPO ISIDRO",
-         "Mexico captures FBI Ten Most Wanted cartel boss \"El Chapo "
-         "Isidro\" with US support. Deadly Sinaloa violence leaves 11 "
-         "dead after the arrest.", accent=TEAL)
-    card(draw, [left_x, bottom_row, left_x + card_w, bottom_row + card_h],
-         "CLIMATE · COP31", "COP31",
-         "Climate talks stretch into overtime with no agreement in "
-         "sight — the fossil-fuel dispute threatens to scupper the deal "
-         "as countries remain divided on key issues.", accent=TEAL)
-    card(draw, [right_x, bottom_row, right_x + card_w, bottom_row + card_h],
-         "UNITED STATES · TRUMP", "TRUMP CAP",
-         "Trump vows to work with Democrats to cap credit card interest "
-         "rates at 10%.")
+    # Wide slot for the hacking story, spanning the whole page width.
+    wide_rect = [EDGE, cursor, PAGE - EDGE, cursor + 112]
+    paint_section(painter, wide_rect, WIDE_STORY)
+    cursor += 112 + GUTTER
 
-    # Full-width card: breaches and a probe, side by side.
-    wide_top = bottom_row + card_h + gap
-    wide_box = [MARGIN, wide_top, WIDTH - MARGIN, wide_top + 112]
-    panel_box(draw, wide_box)
-    draw.rectangle([MARGIN, wide_top + 10, MARGIN + 5, wide_top + 58], fill=GOLD)
-    y = draw_wrapped(draw, (MARGIN + 20, wide_top + 12), "SECURITY AND TECH · UNITED STATES",
-                     font(15, bold=True), GOLD, CONTENT - 40, 19)
-    y = draw_wrapped(draw, (MARGIN + 20, y + 2), "HACKED",
-                     font(21, bold=True), PAPER, CONTENT - 40, 25)
-    wide_body = (
-        "The US Agriculture Department and the FBI are breached by hackers, "
-        "reports say; Nvidia faces a US accounting probe as Jensen Huang's "
-        "exit and a China spy saga deepen the turmoil."
-    )
-    draw_wrapped(draw, (MARGIN + 20, y + 4), wide_body, font(16), MUTED,
-                 CONTENT - 40, 21)
+    # Closing block: a rule, a heading, then the briefs joined by dots.
+    painter.rectangle([EDGE, cursor, PAGE - EDGE, cursor + 3], fill=YELLOW)
+    spot = paint_text(painter, EDGE, cursor + 11, "ALSO TODAY",
+                      typeface(17, heavy=True), YELLOW, SPAN, 21)
+    joined = "  /  ".join(BRIEF_ITEMS)
+    paint_text(painter, EDGE, spot + 4, joined, typeface(16), WHITE, SPAN, 21)
 
-    # Closing strip with the rest of the day in brief.
-    strip_top = wide_top + 120
-    draw.rectangle([MARGIN, strip_top, WIDTH - MARGIN, strip_top + 3], fill=GOLD)
-    y = draw_wrapped(draw, (MARGIN, strip_top + 12), "ALSO TODAY",
-                     font(17, bold=True), GOLD, CONTENT, 21)
-    also_body = (
-        "Fire at a Jakarta confectionery factory kills three, 36 missing · "
-        "At least 24 dead in Nigeria when a boat capsizes carrying people "
-        "to a funeral · French protesters rally for a sixth weekend over "
-        "living costs · China opposes the US ban on telecom firms' access "
-        "to phone numbers."
-    )
-    draw_wrapped(draw, (MARGIN, y + 4), also_body, font(16), PAPER, CONTENT, 21)
+    note = "Wire reports of 22 November 2026 - One page, one day"
+    note_face = typeface(13)
+    note_width = painter.textlength(note, font=note_face)
+    painter.text(((PAGE - note_width) / 2, 990), note, font=note_face, fill=GREY)
 
-    # Small edition line so the page reads as one finished front page.
-    foot_face = font(13)
-    foot_text = "Wire reports of 22 November 2026 · One page, one day"
-    foot_box = draw.textbbox((0, 0), foot_text, font=foot_face)
-    foot_w = foot_box[2] - foot_box[0]
-    draw.text(((WIDTH - foot_w) / 2, 992), foot_text, font=foot_face, fill=MUTED)
-
-    target = HERE / "entry.png"
-    image.save(target, format="PNG")
-    return target
+    canvas.save(OUTPUT_FILE, format="PNG")
+    return OUTPUT_FILE
 
 
 if __name__ == "__main__":
-    print(build_poster())
+    print("Rendered:", render_page())

@@ -1,39 +1,42 @@
 #!/usr/bin/env python3
-"""Entry point for the news-image-20261122 competition entry.
+"""Deliver the finished poster for the 22 November 2026 edition.
 
-The poster itself lives in this repository as entry.png, drawn ahead
-of time by build_poster.py. This program only copies that file to
-the output location the harness asks for, using nothing beyond the
-Python standard library, so every run writes exactly the same bytes
-to exactly the same place.
+The artwork already sits beside this file under the name entry.png.
+Running this module moves a faithful copy of those bytes into the
+folder the competition runner designates, falling back to /output
+when no alternative folder has been supplied through the
+environment.  Only the standard library takes part, and the source
+bytes never change at run time, so repeated runs stay identical.
+The copy is a plain read-then-write of the byte payload, nothing
+is decoded, redrawn, or re-encoded along the way.
 """
 
 import os
-import shutil
 from pathlib import Path
 
-SOURCE = Path(__file__).resolve().parent / "entry.png"
-DEFAULT_OUTPUT_DIR = "/output"
+POSTER_NAME = "entry.png"
+ENV_KEY = "MAKEFUN_OUTPUT_DIR"
+FALLBACK_FOLDER = Path("/output")
 
 
-def output_dir():
-    """Return the directory named by MAKEFUN_OUTPUT_DIR, or /output."""
-    chosen = os.environ.get("MAKEFUN_OUTPUT_DIR", "").strip()
-    return Path(chosen) if chosen else Path(DEFAULT_OUTPUT_DIR)
+def chosen_folder():
+    """Pick the output folder, honouring the environment override."""
+    raw_value = os.getenv(ENV_KEY)
+    if raw_value and raw_value.strip():
+        return Path(raw_value.strip())
+    return FALLBACK_FOLDER
 
 
-def main():
-    """Copy the bundled poster to <output dir>/entry.png.
-
-    The copy is a plain byte-for-byte file copy and the source never
-    changes at run time, which is what keeps two runs identical.
-    """
-    destination_dir = output_dir()
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    destination = destination_dir / "entry.png"
-    shutil.copyfile(SOURCE, destination)
-    return destination
+def publish_poster():
+    """Write the bundled poster bytes into the chosen folder."""
+    bundle_path = Path(__file__).resolve().parent / POSTER_NAME
+    payload = bundle_path.read_bytes()
+    folder = chosen_folder()
+    folder.mkdir(parents=True, exist_ok=True)
+    target_path = folder / POSTER_NAME
+    target_path.write_bytes(payload)
+    return target_path
 
 
 if __name__ == "__main__":
-    print(main())
+    print("Delivered:", publish_poster())
